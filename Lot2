@@ -1,0 +1,131 @@
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Alignment, Font
+
+# Load the provided CSV file
+file_path = r"C:\Users\tiyasa\PycharmProjects\new_filtered_trades.csv"
+df = pd.read_csv(file_path)
+
+# Filter the DataFrame to only include positive profits
+positive_profit_df = df[df['profit'] > 0]
+
+# Group by country and calculate the positive and negative profit, and the counts
+country_profit_analysis = df.groupby('country_name').agg(
+    positive_profit=('profit', lambda x: x[x > 0].sum()),
+    count_positive=('profit', lambda x: (x > 0).sum()),
+    negative_profit=('profit', lambda x: x[x <= 0].sum()),
+    count_negative=('profit', lambda x: (x <= 0).sum())
+).reset_index()
+
+# Sort by positive profit and select the top 5 countries
+top_5_countries = country_profit_analysis.sort_values(by='positive_profit', ascending=False).head(5)
+
+# Filter the DataFrame to include only trades from the top 5 countries
+top_5_countries_df = df[df['country_name'].isin(top_5_countries['country_name'])]
+
+# Group by country and session, then calculate the positive and negative profit, and the counts
+session_profit_analysis = top_5_countries_df.groupby(['country_name', 'Session']).agg(
+    S_profit_positive=('profit', lambda x: x[x > 0].sum()),
+    S_count_positive=('profit', lambda x: (x > 0).sum()),
+    S_profit_negative=('profit', lambda x: x[x <= 0].sum()),
+    S_count_negative=('profit', lambda x: (x <= 0).sum())
+).reset_index()
+
+# Select the top 2 sessions per country based on positive profit
+top_2_sessions_per_country = session_profit_analysis.groupby('country_name', group_keys=False).apply(
+    lambda x: x.sort_values(by='S_profit_positive', ascending=False).head(2)).reset_index(drop=True)
+
+# Create the final DataFrame with the desired structure
+final_analysis = []
+for country in top_5_countries['country_name']:
+    country_data = top_5_countries[top_5_countries['country_name'] == country]
+    sessions_data = top_2_sessions_per_country[top_2_sessions_per_country['country_name'] == country]
+
+    final_analysis.append({
+        'Country': country,
+        'Positive_Profit': country_data['positive_profit'].values[0],
+        'Count+': country_data['count_positive'].values[0],
+        'Negative_Profit': country_data['negative_profit'].values[0],
+        'Count-': country_data['count_negative'].values[0],
+        'Session': None,
+        'S_profit+': None,
+        'S_count+': None,
+        'S_profit-': None,
+        'S_count-': None,
+        'Symbol': None,
+        'Sy_profit+': None,
+        'Sy_count+': None,
+        'Sy_profit-': None,
+        'Sy_count-': None
+    })
+
+    for _, session_row in sessions_data.iterrows():
+        final_analysis.append({
+            'Country': None,
+            'Positive_Profit': None,
+            'Count+': None,
+            'Negative_Profit': None,
+            'Count-': None,
+            'Session': session_row['Session'],
+            'S_profit+': session_row['S_profit_positive'],
+            'S_count+': session_row['S_count_positive'],
+            'S_profit-': session_row['S_profit_negative'],
+            'S_count-': session_row['S_count_negative'],
+            'Symbol': None,
+            'Sy_profit+': None,
+            'Sy_count+': None,
+            'Sy_profit-': None,
+            'Sy_count-': None
+        })
+
+        # Now for each session, get the top 2 symbols
+        session_symbols_df = top_5_countries_df[(top_5_countries_df['country_name'] == country) &
+                                                (top_5_countries_df['Session'] == session_row['Session'])]
+
+        symbol_profit_analysis = session_symbols_df.groupby('symbol').agg(
+            Sy_profit_positive=('profit', lambda x: x[x > 0].sum()),
+            Sy_count_positive=('profit', lambda x: (x > 0).sum()),
+            Sy_profit_negative=('profit', lambda x: x[x <= 0].sum()),
+            Sy_count_negative=('profit', lambda x: (x <= 0).sum())
+        ).reset_index()
+
+        top_2_symbols_per_session = symbol_profit_analysis.sort_values(by='Sy_profit_positive', ascending=False).head(2)
+
+        for _, symbol_row in top_2_symbols_per_session.iterrows():
+            final_analysis.append({
+                'Country': None,
+                'Positive_Profit': None,
+                'Count+': None,
+                'Negative_Profit': None,
+                'Count-': None,
+                'Session': None,
+                'S_profit+': None,
+                'S_count+': None,
+                'S_profit-': None,
+                'S_count-': None,
+                'Symbol': symbol_row['symbol'],
+                'Sy_profit+': symbol_row['Sy_profit_positive'],
+                'Sy_count+': symbol_row['Sy_count_positive'],
+                'Sy_profit-': symbol_row['Sy_profit_negative'],
+                'Sy_count-': symbol_row['Sy_count_negative']
+            })
+
+# Convert the final analysis to a DataFrame
+final_analysis_df = pd.DataFrame(final_analysis)
+
+# Create a new Excel file
+excel_file_path = r"C:\Users\tiyasa\PycharmProjects\3change_analysis.xlsx"
+with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:
+    final_analysis_df.to_excel(writer, sheet_name='Change Analysis', index=False)
+
+    # Format the Excel sheet
+    workbook = writer.book
+    sheet = workbook.active
+    for row in sheet.iter_rows():
+        for cell in row:
+            if cell.value is not None:
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.font = Font(bold=True) if cell.row == 1 else Font()
+
+print(f"Analysis saved to {excel_file_path}")

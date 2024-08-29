@@ -1,0 +1,209 @@
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Alignment, Font
+from openpyxl.worksheet.datavalidation import DataValidation
+
+# Load the provided CSV file
+file_path = r"C:\Users\tiyasa\PycharmProjects\new_filtered_trades.csv"
+df = pd.read_csv(file_path)
+
+# Filter the DataFrame to only include positive profits
+positive_profit_df = df[df['profit'] > 0]
+
+# Group by country and sum the profit for each country
+country_profit_summation = positive_profit_df.groupby('country_name')['profit'].sum()
+
+# Sort the summed profits in descending order and take the top 10 countries
+top_10_countries_profit = country_profit_summation.sort_values(ascending=False).head(10)
+
+# Extract the names of the top 10 countries
+top_10_countries = top_10_countries_profit.index.tolist()
+
+# Filter the DataFrame to include only trades from the top 10 countries
+top_10_countries_df = positive_profit_df[positive_profit_df['country_name'].isin(top_10_countries)]
+
+# Group by country and session, then sum the profit for each session and take the top 3 sessions per country
+top_sessions_by_country = top_10_countries_df.groupby(['country_name', 'Session']).agg(
+    total_profit=('profit', 'sum')).reset_index()
+top_3_sessions_per_country = top_sessions_by_country.groupby('country_name', group_keys=False).apply(
+    lambda x: x.nlargest(3, 'total_profit')).reset_index(drop=True)
+
+# Filter the DataFrame to include only the top 3 sessions per country
+top_3_sessions_df = top_10_countries_df.merge(top_3_sessions_per_country[['country_name', 'Session']],
+                                              on=['country_name', 'Session'])
+
+# Group by country, session, and symbol, then sum the profit for each symbol and take the top 3 symbols per session
+top_symbols_by_session = top_3_sessions_df.groupby(['country_name', 'Session', 'symbol']).agg(
+    total_profit=('profit', 'sum')).reset_index()
+top_3_symbols_per_session = top_symbols_by_session.groupby(['country_name', 'Session'], group_keys=False).apply(
+    lambda x: x.nlargest(3, 'total_profit')).reset_index(drop=True)
+
+# Now, for each symbol, find the two account types with the highest positive profit
+final_lot_selection = []
+for (country, session, symbol), group in top_3_symbols_per_session.groupby(['country_name', 'Session', 'symbol']):
+    symbol_data = top_3_sessions_df[(top_3_sessions_df['symbol'] == symbol) & (top_3_sessions_df['Session'] == session)]
+
+    # Find the top 2 account types with the highest positive profit for this symbol
+    top_2_account_types = symbol_data.groupby('type_account')['profit'].sum().nlargest(2)
+
+    # For each account type, find the top 2 lots with the highest positive profit
+    for account_type in top_2_account_types.index:
+        account_type_data = symbol_data[symbol_data['type_account'] == account_type]
+        top_2_lots = account_type_data.groupby('FinalLot')['profit'].sum().nlargest(2)
+        top_lot_profit = top_2_lots.iloc[0]  # Top lot's profit value
+
+        final_lot_selection.append({
+            'Country': country,
+            'Session': session,
+            'Symbol': symbol,
+            'Account_Type': account_type,
+            'Top_Lots': list(top_2_lots.index),
+            'Top_Lots_Profit': list(top_2_lots.values),
+            'Top_Lot_Profit': top_lot_profit  # Adding highest positive profit corresponding to the top lot
+        })
+
+# Convert final_lot_selection to DataFrame for easier analysis
+final_lot_df = pd.DataFrame(final_lot_selection)
+
+# Define the FinalLot ranges
+final_lot_ranges = [
+    (0.01, 0.1),
+    (0.11, 1.0),
+    (1.1, 3.0),
+    (3.1, 5.0),
+    (5.1, 8.0),
+    (8.1, 10.0),
+    (10.1, 20.0),
+    (20.1, float('inf'))
+]
+
+# Create an empty DataFrame to store the analysis results
+final_lot_analysis = []
+
+for min_lot, max_lot in final_lot_ranges:
+    range_df = top_3_sessions_df[
+        (top_3_sessions_df['FinalLot'] >= min_lot) & (top_3_sessions_df['FinalLot'] <= max_lot)]
+
+    total_trade_count = len(range_df)
+    total_lot_sum = range_df['FinalLot'].sum()
+
+    positive_trades = range_df[range_df['profit'] > 0]
+    positive_trade_count = len(positive_trades)
+    positive_profit_sum = positive_trades['profit'].sum()
+
+    negative_trades = range_df[range_df['profit'] <= 0]
+    negative_trade_count = len(negative_trades)
+    negative_profit_sum = negative_trades['profit'].sum()
+
+    final_lot_analysis.append({
+        'FinalLot_Range': f'{min_lot} - {max_lot if max_lot != float("inf") else "above"}',
+        'Trade_Count': total_trade_count,
+        'Total_Lot': total_lot_sum,
+        'Positive_Trade_Count': positive_trade_count,
+        'Positive_Profit_Sum': positive_profit_sum,
+        'Negative_Trade_Count': negative_trade_count,
+        'Negative_Profit_Sum': negative_profit_sum
+    })
+
+# Convert the analysis to a DataFrame
+final_lot_analysis_df = pd.DataFrame(final_lot_analysis)
+
+# Save the result to a new CSV file
+output_file_path = r"C:\Users\tiyasa\PycharmProjects\4.csv"
+final_lot_df.to_csv(output_file_path, index=False)
+
+# Create a new Excel file
+excel_file_path = r"C:\Users\tiyasa\PycharmProjects\final_analysis.xlsx"
+with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:
+    final_lot_df.to_excel(writer, sheet_name='Data', index=False)
+    final_lot_analysis_df.to_excel(writer, sheet_name='FinalLot Analysis', index=False)
+
+    # Add another sheet for the detailed breakdown with merged cells
+    workbook = writer.book
+    sheet = workbook.create_sheet(title='Merged Analysis')
+
+    # Initialize variables for merging cells
+    current_row = 1
+
+    # Iterate through the top 10 countries
+    for country, country_profit in top_10_countries_profit.items():
+        # Write country name and profit, and merge cells
+        sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=2)
+        sheet.cell(row=current_row, column=1).value = f'{country} - {country_profit:.2f}'
+        sheet.cell(row=current_row, column=1).alignment = Alignment(horizontal='center', vertical='center')
+        sheet.cell(row=current_row, column=1).font = Font(bold=True)
+        current_row += 1
+
+        # Get the top 3 sessions for this country
+        country_sessions = top_3_sessions_per_country[top_3_sessions_per_country['country_name'] == country]
+        for session, session_profit in country_sessions.set_index('Session')['total_profit'].items():
+            # Write session name and profit, and merge cells
+            sheet.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=3)
+            sheet.cell(row=current_row, column=2).value = f'{session} - {session_profit:.2f}'
+            sheet.cell(row=current_row, column=2).alignment = Alignment(horizontal='center', vertical='center')
+            sheet.cell(row=current_row, column=2).font = Font(italic=True)
+            current_row += 1
+
+            # Get the top 3 symbols for this session
+            session_symbols = top_3_symbols_per_session[(top_3_symbols_per_session['country_name'] == country) &
+                                                        (top_3_symbols_per_session['Session'] == session)]
+            for symbol, symbol_profit in session_symbols.set_index('symbol')['total_profit'].items():
+                # Write symbol name and profit, and merge cells
+                sheet.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=4)
+                sheet.cell(row=current_row, column=3).value = f'{symbol} - {symbol_profit:.2f}'
+                sheet.cell(row=current_row, column=3).alignment = Alignment(horizontal='center', vertical='center')
+                current_row += 1
+
+                # Get the top 2 account types for this symbol
+                symbol_accounts = final_lot_df[(final_lot_df['Country'] == country) &
+                                               (final_lot_df['Session'] == session) &
+                                               (final_lot_df['Symbol'] == symbol)]
+                for index, row in symbol_accounts.iterrows():
+                    account_type = row['Account_Type']
+                    account_type_profit = row['Top_Lot_Profit']
+
+                    # Write account type and profit, and merge cells
+                    sheet.merge_cells(start_row=current_row, start_column=4, end_row=current_row, end_column=5)
+                    sheet.cell(row=current_row, column=4).value = f'{account_type} - {account_type_profit:.2f}'
+                    sheet.cell(row=current_row, column=4).alignment = Alignment(horizontal='center', vertical='center')
+                    current_row += 1
+
+                    # Get the top 2 lots for this account type
+                    top_lots = row['Top_Lots']
+                    top_lots_profit = row['Top_Lots_Profit']
+                    for lot, profit in zip(top_lots, top_lots_profit):
+                        # Write lot range and profit
+                        sheet.cell(row=current_row, column=5).value = f'{lot} - {profit:.2f}'
+                        sheet.cell(row=current_row, column=5).alignment = Alignment(horizontal='center',
+                                                                                    vertical='center')
+                        current_row += 1
+
+                    # Create a new sheet for FinalLot Range Analysis
+                sheet_lot_analysis = workbook.create_sheet(title='FinalLot Range Analysis')
+
+                # Write the FinalLot analysis data to the sheet
+                for r_idx, row in enumerate(dataframe_to_rows(final_lot_analysis_df, index=False, header=True), 1):
+                    for c_idx, value in enumerate(row, 1):
+                        sheet_lot_analysis.cell(row=r_idx, column=c_idx, value=value)
+
+                # Add data validation (dropdown) for FinalLot ranges
+                dv = DataValidation(
+                    type="list",
+                    formula1='"0.01-0.1,0.11-1.0,1.1-3.0,3.1-5.0,5.1-8.0,8.1-10.0,10.1-20.0,20.1-above"',
+                    allow_blank=True
+                )
+                dv.error = 'Please select a valid FinalLot range from the list.'
+                dv.errorTitle = 'Invalid Entry'
+                dv.prompt = 'Select a FinalLot range from the dropdown list.'
+                dv.promptTitle = 'FinalLot Range'
+
+                # Apply the data validation to the A column of the FinalLot Range Analysis sheet
+                dv.add(f'A2:A{len(final_lot_analysis_df) + 1}')
+                sheet_lot_analysis.add_data_validation(dv)
+
+                # Save the workbook
+            workbook.save(excel_file_path)
+
+            print(f"Analysis saved to {excel_file_path}")
+
